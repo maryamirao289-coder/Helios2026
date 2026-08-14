@@ -23,6 +23,8 @@
 /* USER CODE BEGIN Includes */
 #include "mpu6050.h"
 #include "mahony.h"
+#include "protocol.h"
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -32,7 +34,9 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define ATTITUDE_HISTORY_SIZE              16
 
+#define PROTOCOL_TEST_CORRUPT_SEQUENCE     3000
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -74,21 +78,84 @@ volatile uint32_t imu_sample_rate = 0;
 uint32_t rate_last_tick = 0;
 uint32_t rate_last_sample_count = 0;
 
-volatile uint8_t uart_test_tx = 0x55;
 
-volatile HAL_StatusTypeDef uart_test_tx_status = HAL_ERROR;
+Protocol_Attitude_t attitude_tx_data;
 
-volatile uint32_t uart_test_tx_count = 0;
+uint8_t attitude_tx_frame[
+    PROTOCOL_ATTITUDE_FRAME_LEN
+];
 
-uint32_t uart_test_last_tick = 0;
+volatile uint16_t attitude_tx_sequence = 0;
 
-volatile uint8_t uart_rx_byte = 0;
+volatile uint32_t attitude_tx_count = 0;
+volatile uint32_t attitude_tx_error_count = 0;
 
-volatile HAL_StatusTypeDef uart_rx_start_status = HAL_ERROR;
+volatile HAL_StatusTypeDef
+    attitude_tx_status = HAL_ERROR;
 
-volatile uint32_t uart_rx_count = 0;
-volatile uint32_t uart_rx_aa_count = 0;
+/* Attitude frame history for retransmission */
+uint8_t attitude_history
+    [ATTITUDE_HISTORY_SIZE]
+    [PROTOCOL_ATTITUDE_FRAME_LEN];
 
+uint16_t attitude_history_sequence[
+    ATTITUDE_HISTORY_SIZE
+];
+
+uint8_t attitude_history_valid[
+    ATTITUDE_HISTORY_SIZE
+];
+
+uint8_t attitude_history_write_index = 0;
+
+
+/* Retransmit request RX */
+uint8_t retransmit_sync_byte = 0;
+
+uint8_t retransmit_rx_frame[
+    PROTOCOL_RETRANSMIT_REQUEST_LEN
+];
+
+volatile uint8_t retransmit_rx_state = 0;
+volatile uint8_t retransmit_request_pending = 0;
+
+volatile HAL_StatusTypeDef
+    retransmit_rx_start_status = HAL_ERROR;
+
+volatile Protocol_Status_t
+    retransmit_request_status = PROTOCOL_OK;
+
+volatile uint16_t
+    retransmit_requested_sequence = 0;
+
+
+/* Retransmit TX */
+uint8_t retransmit_tx_frame[
+    PROTOCOL_ATTITUDE_FRAME_LEN
+];
+
+volatile uint8_t retransmit_tx_pending = 0;
+volatile uint8_t retransmit_tx_in_progress = 0;
+
+volatile HAL_StatusTypeDef
+    retransmit_tx_status = HAL_ERROR;
+
+volatile uint32_t retransmit_request_count = 0;
+volatile uint32_t retransmit_tx_count = 0;
+volatile uint32_t retransmit_tx_error_count = 0;
+volatile uint32_t retransmit_not_found_count = 0;
+
+
+/*
+ * Test switch:
+ *
+ * 1 = intentionally corrupt one frame
+ *     to verify CRC retransmission
+ *
+ * After verification change this to 0.
+ */
+volatile uint8_t protocol_test_enable = 0;
+volatile uint8_t protocol_test_done = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -103,7 +170,35 @@ static void MX_USART1_UART_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static uint8_t Slave_FindHistoryFrame(
+    uint16_t sequence,
+    uint8_t *frame
+)
+{
+    uint8_t i;
 
+
+    for (i = 0;
+         i < ATTITUDE_HISTORY_SIZE;
+         i++)
+    {
+        if ((attitude_history_valid[i] != 0) &&
+            (attitude_history_sequence[i] ==
+             sequence))
+        {
+            memcpy(
+                frame,
+                attitude_history[i],
+                PROTOCOL_ATTITUDE_FRAME_LEN
+            );
+
+            return 1;
+        }
+    }
+
+
+    return 0;
+}
 /* USER CODE END 0 */
 
 /**
@@ -169,12 +264,12 @@ if ((imu_init_status == HAL_OK) &&
     rate_last_sample_count = imu_sample_count;
 }
 
-uart_test_last_tick = HAL_GetTick();
+retransmit_rx_state = 0;
 
-uart_rx_start_status =
+retransmit_rx_start_status =
     HAL_UART_Receive_IT(
         &huart1,
-        (uint8_t *)&uart_rx_byte,
+        &retransmit_sync_byte,
         1
     );
   /* USER CODE END 2 */
@@ -227,31 +322,197 @@ uart_rx_start_status =
             );
             /* 一次完整采样成功 */
             imu_sample_count++;
+            
+						/* Copy current attitude */
+attitude_tx_data.q0 =
+    mahony.q0;
+
+attitude_tx_data.q1 =
+    mahony.q1;
+
+attitude_tx_data.q2 =
+    mahony.q2;
+
+attitude_tx_data.q3 =
+    mahony.q3;
+
+attitude_tx_data.roll =
+    mahony.roll;
+
+attitude_tx_data.pitch =
+    mahony.pitch;
+
+attitude_tx_data.yaw =
+    mahony.yaw;
+
+
+/* Build protocol frame */
+Protocol_BuildAttitudeFrame(
+    attitude_tx_frame,
+    attitude_tx_sequence,
+    &attitude_tx_data
+);
+
+
+/*
+ * Save the correct frame before sending.
+ *
+ * If master later requests this sequence,
+ * the original correct frame can be resent.
+ */
+memcpy(
+    attitude_history[
+        attitude_history_write_index
+    ],
+    attitude_tx_frame,
+    PROTOCOL_ATTITUDE_FRAME_LEN
+);
+
+attitude_history_sequence[
+    attitude_history_write_index
+] = attitude_tx_sequence;
+
+attitude_history_valid[
+    attitude_history_write_index
+] = 1;
+
+
+attitude_history_write_index++;
+
+if (attitude_history_write_index >=
+    ATTITUDE_HISTORY_SIZE)
+{
+    attitude_history_write_index = 0;
+}
+
+
+/*
+ * Test only:
+ *
+ * Intentionally corrupt one payload byte
+ * when sequence reaches 3000.
+ *
+ * CRC remains unchanged, therefore master
+ * must detect PROTOCOL_ERROR_CRC.
+ *
+ * The history copy above remains correct.
+ */
+if ((protocol_test_enable != 0) &&
+    (protocol_test_done == 0) &&
+    (attitude_tx_sequence ==
+     PROTOCOL_TEST_CORRUPT_SEQUENCE))
+{
+    attitude_tx_frame[10] ^= 0x01;
+
+    protocol_test_done = 1;
+}
+
+
+/* Send normal attitude frame */
+attitude_tx_status =
+    HAL_UART_Transmit(
+        &huart1,
+        attitude_tx_frame,
+        PROTOCOL_ATTITUDE_FRAME_LEN,
+        2
+    );
+
+
+if (attitude_tx_status == HAL_OK)
+{
+    attitude_tx_count++;
+
+    attitude_tx_sequence++;
+}
+else
+{
+    attitude_tx_error_count++;
+}
         }
 				
     }
 		
 		
-		if ((HAL_GetTick() - uart_test_last_tick) >= 1000)
-{
-    uart_test_last_tick += 1000;
 
-    uart_test_tx_status =
-        HAL_UART_Transmit(
-            &huart1,
-            (uint8_t *)&uart_test_tx,
-            1,
-            10
+/*
+ * Process retransmit request
+ */
+if (retransmit_request_pending)
+{
+    retransmit_request_status =
+        Protocol_ParseRetransmitRequest(
+            retransmit_rx_frame,
+            PROTOCOL_RETRANSMIT_REQUEST_LEN,
+            (uint16_t *)
+            &retransmit_requested_sequence
         );
 
-    if (uart_test_tx_status == HAL_OK)
+
+    if (retransmit_request_status ==
+        PROTOCOL_OK)
     {
-        uart_test_tx_count++;
+        retransmit_request_count++;
+
+
+        if (Slave_FindHistoryFrame(
+                retransmit_requested_sequence,
+                retransmit_tx_frame))
+        {
+            retransmit_tx_pending = 1;
+        }
+        else
+        {
+            retransmit_not_found_count++;
+        }
+    }
+
+
+    retransmit_request_pending = 0;
+
+    retransmit_rx_state = 0;
+
+
+    /*
+     * Wait for next retransmit request.
+     */
+    HAL_UART_Receive_IT(
+        &huart1,
+        &retransmit_sync_byte,
+        1
+    );
+}
+
+
+/*
+ * Send retransmitted frame asynchronously.
+ *
+ * Using interrupt TX here avoids blocking
+ * the 1 kHz IMU task for another 36 bytes.
+ */
+if ((retransmit_tx_pending != 0) &&
+    (retransmit_tx_in_progress == 0))
+{
+    retransmit_tx_pending = 0;
+
+
+    retransmit_tx_status =
+        HAL_UART_Transmit_IT(
+            &huart1,
+            retransmit_tx_frame,
+            PROTOCOL_ATTITUDE_FRAME_LEN
+        );
+
+
+    if (retransmit_tx_status == HAL_OK)
+    {
+        retransmit_tx_in_progress = 1;
+    }
+    else
+    {
+        retransmit_tx_error_count++;
     }
 }
-		
-		
-		    /* ==================== 每1秒统计一次采样率 ==================== */
+		/* ==================== 每1秒统计一次采样率 ==================== */
     if ((HAL_GetTick() - rate_last_tick) >= 1000)
     {
         imu_sample_rate =
@@ -462,23 +723,110 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     }
 }
 
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+void HAL_UART_RxCpltCallback(
+    UART_HandleTypeDef *huart
+)
 {
     if (huart->Instance == USART1)
     {
-        uart_rx_count++;
-
-        if (uart_rx_byte == 0xAA)
+        /*
+         * State 0:
+         * wait for 0xAA
+         */
+        if (retransmit_rx_state == 0)
         {
-            uart_rx_aa_count++;
+            if (retransmit_sync_byte ==
+                PROTOCOL_HEADER_1)
+            {
+                retransmit_rx_frame[0] =
+                    retransmit_sync_byte;
+
+                retransmit_rx_state = 1;
+            }
+
+
+            HAL_UART_Receive_IT(
+                &huart1,
+                &retransmit_sync_byte,
+                1
+            );
         }
 
-        /* 继续接收下一字节 */
-        HAL_UART_Receive_IT(
-            &huart1,
-            (uint8_t *)&uart_rx_byte,
-            1
-        );
+
+        /*
+         * State 1:
+         * wait for 0x55
+         */
+        else if (retransmit_rx_state == 1)
+        {
+            if (retransmit_sync_byte ==
+                PROTOCOL_HEADER_2)
+            {
+                retransmit_rx_frame[1] =
+                    retransmit_sync_byte;
+
+                retransmit_rx_state = 2;
+
+
+                /*
+                 * Receive remaining 6 bytes.
+                 */
+                HAL_UART_Receive_IT(
+                    &huart1,
+                    &retransmit_rx_frame[2],
+                    PROTOCOL_RETRANSMIT_REQUEST_LEN - 2
+                );
+            }
+            else
+            {
+                if (retransmit_sync_byte ==
+                    PROTOCOL_HEADER_1)
+                {
+                    retransmit_rx_frame[0] =
+                        retransmit_sync_byte;
+
+                    retransmit_rx_state = 1;
+                }
+                else
+                {
+                    retransmit_rx_state = 0;
+                }
+
+
+                HAL_UART_Receive_IT(
+                    &huart1,
+                    &retransmit_sync_byte,
+                    1
+                );
+            }
+        }
+
+
+        /*
+         * State 2:
+         * complete retransmit request received
+         */
+        else if (retransmit_rx_state == 2)
+        {
+            retransmit_request_pending = 1;
+
+            retransmit_rx_state = 3;
+        }
+    }
+}
+
+void HAL_UART_TxCpltCallback(
+    UART_HandleTypeDef *huart
+)
+{
+    if (huart->Instance == USART1)
+    {
+        if (retransmit_tx_in_progress != 0)
+        {
+            retransmit_tx_in_progress = 0;
+
+            retransmit_tx_count++;
+        }
     }
 }
 /* USER CODE END 4 */
