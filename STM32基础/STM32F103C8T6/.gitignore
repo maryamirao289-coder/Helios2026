@@ -1,0 +1,8 @@
+# Claude Code local (user-specific) settings
+.claude/settings.local.json
+
+# Keil MDK-ARM build outputs
+MDK-ARM/STM32F103C8T6/
+MDK-ARM/DebugConfig/
+MDK-ARM/*.lst
+MDK-ARM/*.uvguix.*
