@@ -116,6 +116,41 @@ volatile uint32_t
 
 volatile uint32_t
     pc_attitude_tx_busy_count = 0;
+
+uint8_t pc_rx_byte = 0;
+
+char pc_rx_line[64];
+
+volatile uint8_t pc_rx_index = 0;
+volatile uint8_t pc_command_pending = 0;
+
+volatile HAL_StatusTypeDef
+    pc_rx_start_status = HAL_ERROR;
+
+volatile float pc_kp = 0.0f;
+volatile float pc_ki = 0.0f;
+
+volatile uint32_t
+    pc_gain_cmd_count = 0;
+
+volatile uint32_t
+    pc_gain_cmd_error_count = 0;
+
+uint8_t gains_tx_frame[
+    PROTOCOL_SET_GAINS_FRAME_LEN
+];
+
+volatile uint16_t
+    gains_tx_sequence = 0;
+
+volatile HAL_StatusTypeDef
+    gains_tx_status = HAL_ERROR;
+
+volatile uint32_t
+    gains_tx_count = 0;
+
+volatile uint32_t
+    gains_tx_error_count = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -181,6 +216,13 @@ frame_rate_last_count =
     frame_ok_count;
 
 pc_attitude_last_tick = HAL_GetTick();
+
+pc_rx_start_status =
+    HAL_UART_Receive_IT(
+        &huart2,
+        &pc_rx_byte,
+        1
+    );
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -359,6 +401,75 @@ if ((HAL_GetTick() - pc_attitude_last_tick) >= 10)
     else
     {
         pc_attitude_tx_busy_count++;
+    }
+}
+
+
+/*
+ * Parse gain command from PC
+ *
+ * Example:
+ * KP=2.50,KI=0.02
+ */
+if (pc_command_pending)
+{
+    float new_kp;
+    float new_ki;
+
+
+    pc_command_pending = 0;
+
+
+    if (sscanf(
+            pc_rx_line,
+            "KP=%f,KI=%f",
+            &new_kp,
+            &new_ki
+        ) == 2)
+    {
+        pc_kp = new_kp;
+        pc_ki = new_ki;
+
+        pc_gain_cmd_count++;
+
+
+        /*
+         * Build SET_GAINS protocol frame
+         */
+        Protocol_BuildSetGainsFrame(
+            gains_tx_frame,
+            gains_tx_sequence,
+            pc_kp,
+            pc_ki
+        );
+
+
+        /*
+         * Send gain command to slave
+         */
+        gains_tx_status =
+            HAL_UART_Transmit(
+                &huart1,
+                gains_tx_frame,
+                PROTOCOL_SET_GAINS_FRAME_LEN,
+                10
+            );
+
+
+        if (gains_tx_status == HAL_OK)
+        {
+            gains_tx_count++;
+
+            gains_tx_sequence++;
+        }
+        else
+        {
+            gains_tx_error_count++;
+        }
+    }
+    else
+    {
+        pc_gain_cmd_error_count++;
     }
 }
 
@@ -586,7 +697,51 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
             uart_rx_state = 3;
         }
     }
+		    else if (huart->Instance == USART2)
+    {
+        if (pc_rx_byte == '\n')
+        {
+            if (pc_rx_index > 0)
+            {
+                pc_rx_line[pc_rx_index] = '\0';
+
+                pc_command_pending = 1;
+
+                pc_rx_index = 0;
+            }
+        }
+        else if (pc_rx_byte != '\r')
+        {
+            if (pc_rx_index <
+                (sizeof(pc_rx_line) - 1))
+            {
+                pc_rx_line[pc_rx_index] =
+                    (char)pc_rx_byte;
+
+                pc_rx_index++;
+            }
+            else
+            {
+                /*
+                 * Buffer overflow:
+                 * discard current command
+                 */
+                pc_rx_index = 0;
+            }
+        }
+
+
+        /*
+         * Continue receiving next PC byte
+         */
+        HAL_UART_Receive_IT(
+            &huart2,
+            &pc_rx_byte,
+            1
+        );
+    }
 }
+
 
 void HAL_UART_TxCpltCallback(
     UART_HandleTypeDef *huart
