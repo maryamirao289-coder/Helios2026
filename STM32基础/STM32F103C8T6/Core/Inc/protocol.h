@@ -12,6 +12,13 @@
 #define PROTOCOL_CMD_RETRANSMIT        0x02
 #define PROTOCOL_CMD_SET_GAINS         0x03
 
+#define PROTOCOL_CMD_GAINS_ACK         0x04
+
+#define PROTOCOL_GAINS_ACK_PAYLOAD_LEN 28
+#define PROTOCOL_GAINS_ACK_FRAME_LEN   36
+
+#define PROTOCOL_GAINS_ACK_OK          0x00
+
 #define PROTOCOL_ATTITUDE_PAYLOAD_LEN  28
 #define PROTOCOL_ATTITUDE_FRAME_LEN    36
 #define PROTOCOL_RETRANSMIT_REQUEST_LEN    8
@@ -90,5 +97,25 @@ Protocol_Status_t Protocol_ParseSetGainsFrame(
     uint16_t *sequence,
     float *kp,
     float *ki
+);
+		
+/* Build gain ACK frame */
+uint16_t Protocol_BuildGainsAckFrame(
+    uint8_t *frame,
+    uint16_t sequence,
+    float kp,
+    float ki,
+    uint8_t result
+);
+
+
+/* Parse gain ACK frame */
+Protocol_Status_t Protocol_ParseGainsAckFrame(
+    const uint8_t *frame,
+    uint16_t length,
+    uint16_t *sequence,
+    float *kp,
+    float *ki,
+    uint8_t *result
 );
 #endif

@@ -569,3 +569,170 @@ Protocol_Status_t Protocol_ParseSetGainsFrame(
 
     return PROTOCOL_OK;
 }
+
+uint16_t Protocol_BuildGainsAckFrame(
+    uint8_t *frame,
+    uint16_t sequence,
+    float kp,
+    float ki,
+    uint8_t result
+)
+{
+    uint16_t crc;
+
+
+    if (frame == NULL)
+    {
+        return 0;
+    }
+
+
+    memset(
+        frame,
+        0,
+        PROTOCOL_GAINS_ACK_FRAME_LEN
+    );
+
+
+    frame[0] = PROTOCOL_HEADER_1;
+    frame[1] = PROTOCOL_HEADER_2;
+
+    frame[2] = PROTOCOL_CMD_GAINS_ACK;
+
+    frame[3] = PROTOCOL_GAINS_ACK_PAYLOAD_LEN;
+
+
+    Protocol_WriteU16LE(
+        &frame[4],
+        sequence
+    );
+
+
+    Protocol_WriteFloatLE(
+        &frame[6],
+        kp
+    );
+
+
+    Protocol_WriteFloatLE(
+        &frame[10],
+        ki
+    );
+
+
+    frame[14] = result;
+
+
+    /*
+     * CRC covers:
+     * CMD + LEN + SEQ + Payload
+     *
+     * 32 bytes total.
+     */
+    crc = CRC16_CCITT_FALSE(
+        &frame[2],
+        32
+    );
+
+
+    Protocol_WriteU16LE(
+        &frame[34],
+        crc
+    );
+
+
+    return PROTOCOL_GAINS_ACK_FRAME_LEN;
+}
+
+
+Protocol_Status_t Protocol_ParseGainsAckFrame(
+    const uint8_t *frame,
+    uint16_t length,
+    uint16_t *sequence,
+    float *kp,
+    float *ki,
+    uint8_t *result
+)
+{
+    uint16_t received_crc;
+    uint16_t calculated_crc;
+
+
+    if ((frame == NULL) ||
+        (sequence == NULL) ||
+        (kp == NULL) ||
+        (ki == NULL) ||
+        (result == NULL))
+    {
+        return PROTOCOL_ERROR_LENGTH;
+    }
+
+
+    if (length != PROTOCOL_GAINS_ACK_FRAME_LEN)
+    {
+        return PROTOCOL_ERROR_LENGTH;
+    }
+
+
+    if ((frame[0] != PROTOCOL_HEADER_1) ||
+        (frame[1] != PROTOCOL_HEADER_2))
+    {
+        return PROTOCOL_ERROR_HEADER;
+    }
+
+
+    if (frame[2] != PROTOCOL_CMD_GAINS_ACK)
+    {
+        return PROTOCOL_ERROR_CMD;
+    }
+
+
+    if (frame[3] !=
+        PROTOCOL_GAINS_ACK_PAYLOAD_LEN)
+    {
+        return PROTOCOL_ERROR_LENGTH;
+    }
+
+
+    *sequence =
+        Protocol_ReadU16LE(
+            &frame[4]
+        );
+
+
+    received_crc =
+        Protocol_ReadU16LE(
+            &frame[34]
+        );
+
+
+    calculated_crc =
+        CRC16_CCITT_FALSE(
+            &frame[2],
+            32
+        );
+
+
+    if (received_crc != calculated_crc)
+    {
+        return PROTOCOL_ERROR_CRC;
+    }
+
+
+    *kp =
+        Protocol_ReadFloatLE(
+            &frame[6]
+        );
+
+
+    *ki =
+        Protocol_ReadFloatLE(
+            &frame[10]
+        );
+
+
+    *result = frame[14];
+
+
+    return PROTOCOL_OK;
+}

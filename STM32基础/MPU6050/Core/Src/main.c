@@ -9,6 +9,7 @@
   * Copyright (c) 2026 STMicroelectronics.
   * All rights reserved.
   *
+
   * This software is licensed under terms that can be found in the LICENSE file
   * in the root directory of this software component.
   * If no LICENSE file comes with this software, it is provided AS-IS.
@@ -140,6 +141,23 @@ float set_gains_ki = 0.0f;
 
 volatile uint32_t set_gains_count = 0;
 volatile uint32_t set_gains_error_count = 0;
+
+
+uint8_t gains_ack_frame[
+    PROTOCOL_GAINS_ACK_FRAME_LEN
+];
+
+volatile uint8_t
+    gains_ack_pending = 0;
+
+volatile HAL_StatusTypeDef
+    gains_ack_tx_status = HAL_ERROR;
+
+volatile uint32_t
+    gains_ack_tx_count = 0;
+
+volatile uint32_t
+    gains_ack_tx_error_count = 0;
 
 
 /* Retransmit TX */
@@ -421,25 +439,50 @@ if ((protocol_test_enable != 0) &&
 }
 
 
-/* Send normal attitude frame */
-attitude_tx_status =
-    HAL_UART_Transmit(
-        &huart1,
-        attitude_tx_frame,
-        PROTOCOL_ATTITUDE_FRAME_LEN,
-        2
-    );
-
-
-if (attitude_tx_status == HAL_OK)
+if (gains_ack_pending != 0)
 {
-    attitude_tx_count++;
+    gains_ack_tx_status =
+        HAL_UART_Transmit(
+            &huart1,
+            gains_ack_frame,
+            PROTOCOL_GAINS_ACK_FRAME_LEN,
+            2
+        );
 
-    attitude_tx_sequence++;
+
+    if (gains_ack_tx_status == HAL_OK)
+    {
+        gains_ack_pending = 0;
+
+        gains_ack_tx_count++;
+    }
+    else
+    {
+        gains_ack_tx_error_count++;
+    }
 }
 else
 {
-    attitude_tx_error_count++;
+    /* Send normal attitude frame */
+    attitude_tx_status =
+        HAL_UART_Transmit(
+            &huart1,
+            attitude_tx_frame,
+            PROTOCOL_ATTITUDE_FRAME_LEN,
+            2
+        );
+
+
+    if (attitude_tx_status == HAL_OK)
+    {
+        attitude_tx_count++;
+
+        attitude_tx_sequence++;
+    }
+    else
+    {
+        attitude_tx_error_count++;
+    }
 }
         }
 				
@@ -503,6 +546,18 @@ if (retransmit_request_pending)
                 set_gains_kp,
                 set_gains_ki
             );
+
+
+            Protocol_BuildGainsAckFrame(
+                gains_ack_frame,
+                set_gains_sequence,
+                mahony.kp,
+                mahony.ki,
+                PROTOCOL_GAINS_ACK_OK
+            );
+
+
+            gains_ack_pending = 1;
 
             set_gains_count++;
         }
@@ -955,7 +1010,7 @@ void Error_Handler(void)
 }
 #ifdef USE_FULL_ASSERT
 /**
-  * @brief  Reports the name of the source file and the source line number
+  * @brief  Reports the name of the source file name and the source line number
   *         where the assert_param error has occurred.
   * @param  file: pointer to the source file name
   * @param  line: assert_param error line source number

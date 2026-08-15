@@ -607,6 +607,36 @@ class MPU6050App:
                 if not line:
                     continue
 
+                if line.startswith("GAIN_OK,"):
+                    ack_parts = line.split(",")
+
+                    if len(ack_parts) == 3:
+                        try:
+                            ack_kp = float(
+                                ack_parts[1]
+                            )
+
+                            ack_ki = float(
+                                ack_parts[2]
+                            )
+
+                        except ValueError:
+                            self.rx_queue.put(
+                                ("error", None)
+                            )
+                            continue
+
+                        self.rx_queue.put(
+                            (
+                                "gain_ack",
+                                (
+                                    ack_kp,
+                                    ack_ki
+                                )
+                            )
+                        )
+
+                        continue
                 parts = line.split(",")
 
                 if len(parts) != 3:
@@ -706,6 +736,28 @@ class MPU6050App:
                 )
 
                 plot_changed = True
+
+            elif message_type == "gain_ack":
+                ack_kp, ack_ki = payload
+
+                self.kp_var.set(
+                    "{:.2f}".format(
+                        ack_kp
+                    )
+                )
+
+                self.ki_var.set(
+                    "{:.4f}".format(
+                        ack_ki
+                    )
+                )
+
+                self.status_var.set(
+                    "Confirmed: Kp={:.6f}, Ki={:.6f}".format(
+                        ack_kp,
+                        ack_ki
+                    )
+                )
 
             elif message_type == "error":
                 self.rx_error_count += 1

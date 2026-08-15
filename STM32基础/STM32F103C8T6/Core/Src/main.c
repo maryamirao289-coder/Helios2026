@@ -151,6 +151,42 @@ volatile uint32_t
 
 volatile uint32_t
     gains_tx_error_count = 0;
+
+
+volatile uint8_t
+    gains_waiting = 0;
+
+volatile uint16_t
+    gains_waiting_sequence = 0;
+
+
+volatile Protocol_Status_t
+    gains_ack_status = PROTOCOL_OK;
+
+uint16_t gains_ack_sequence = 0;
+
+float gains_ack_kp = 0.0f;
+float gains_ack_ki = 0.0f;
+
+uint8_t gains_ack_result = 0xFF;
+
+volatile uint32_t
+    gains_ack_count = 0;
+
+volatile uint32_t
+    gains_ack_error_count = 0;
+
+
+volatile uint8_t
+    pc_gain_ack_pending = 0;
+
+char pc_gain_ack_buffer[64];
+
+volatile HAL_StatusTypeDef
+    pc_gain_ack_tx_status = HAL_ERROR;
+
+volatile uint32_t
+    pc_gain_ack_tx_count = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -235,47 +271,90 @@ pc_rx_start_status =
 
 		if (uart_frame_pending)
 		{
-		    protocol_last_status =
-		        Protocol_ParseAttitudeFrame(
-		            uart_rx_frame,
-		            PROTOCOL_ATTITUDE_FRAME_LEN,
-		            &received_sequence,
-		            &received_attitude
-		        );
-			if (protocol_last_status == PROTOCOL_OK)
+if (uart_rx_frame[2] ==
+    PROTOCOL_CMD_ATTITUDE)
 {
-    frame_ok_count++;
+    protocol_last_status =
+        Protocol_ParseAttitudeFrame(
+            uart_rx_frame,
+            PROTOCOL_ATTITUDE_FRAME_LEN,
+            &received_sequence,
+            &received_attitude
+        );
 
 
-    /*
-     * Was this the frame we requested again?
-     */
-    if ((retransmit_waiting != 0) &&
-        (received_sequence ==
-         retransmit_waiting_sequence))
+    if (protocol_last_status == PROTOCOL_OK)
     {
-        retransmit_success_count++;
+        frame_ok_count++;
 
-        retransmit_waiting = 0;
+
+        /*
+         * Was this the frame we requested again?
+         */
+        if ((retransmit_waiting != 0) &&
+            (received_sequence ==
+             retransmit_waiting_sequence))
+        {
+            retransmit_success_count++;
+
+            retransmit_waiting = 0;
+        }
+    }
+    else if (
+        protocol_last_status ==
+        PROTOCOL_ERROR_CRC
+    )
+    {
+        frame_crc_error_count++;
+
+
+        /*
+         * Protocol_ParseAttitudeFrame()
+         * already extracted SEQ before
+         * checking CRC.
+         */
+        retransmit_request_sequence =
+            received_sequence;
+
+        retransmit_request_pending = 1;
+    }
+    else
+    {
+        frame_other_error_count++;
     }
 }
-else if (
-    protocol_last_status ==
-    PROTOCOL_ERROR_CRC
-)
+else if (uart_rx_frame[2] ==
+         PROTOCOL_CMD_GAINS_ACK)
 {
-    frame_crc_error_count++;
+    gains_ack_status =
+        Protocol_ParseGainsAckFrame(
+            uart_rx_frame,
+            PROTOCOL_GAINS_ACK_FRAME_LEN,
+            &gains_ack_sequence,
+            &gains_ack_kp,
+            &gains_ack_ki,
+            &gains_ack_result
+        );
 
 
-    /*
-     * Protocol_ParseAttitudeFrame()
-     * already extracted SEQ before
-     * checking CRC.
-     */
-    retransmit_request_sequence =
-        received_sequence;
+    if ((gains_ack_status ==
+         PROTOCOL_OK) &&
+        (gains_ack_result ==
+         PROTOCOL_GAINS_ACK_OK) &&
+        (gains_waiting != 0) &&
+        (gains_ack_sequence ==
+         gains_waiting_sequence))
+    {
+        gains_ack_count++;
 
-    retransmit_request_pending = 1;
+        gains_waiting = 0;
+
+        pc_gain_ack_pending = 1;
+    }
+    else
+    {
+        gains_ack_error_count++;
+    }
 }
 else
 {
@@ -356,7 +435,48 @@ if (retransmit_request_pending)
 /*
  * Send Roll / Pitch / Yaw to PC at 100Hz
  */
-if ((HAL_GetTick() - pc_attitude_last_tick) >= 10)
+if (pc_gain_ack_pending != 0)
+{
+    if (pc_attitude_tx_busy == 0)
+    {
+        int pc_gain_ack_length;
+
+
+        pc_gain_ack_length =
+            snprintf(
+                pc_gain_ack_buffer,
+                sizeof(pc_gain_ack_buffer),
+                "GAIN_OK,%.6f,%.6f\n",
+                gains_ack_kp,
+                gains_ack_ki
+            );
+
+
+        if ((pc_gain_ack_length > 0) &&
+            (pc_gain_ack_length <
+             sizeof(pc_gain_ack_buffer)))
+        {
+            pc_gain_ack_tx_status =
+                HAL_UART_Transmit_IT(
+                    &huart2,
+                    (uint8_t *)pc_gain_ack_buffer,
+                    pc_gain_ack_length
+                );
+
+
+            if (pc_gain_ack_tx_status ==
+                HAL_OK)
+            {
+                pc_attitude_tx_busy = 1;
+
+                pc_gain_ack_pending = 0;
+
+                pc_gain_ack_tx_count++;
+            }
+        }
+    }
+}
+else if ((HAL_GetTick() - pc_attitude_last_tick) >= 10)
 {
     int pc_attitude_length;
 
@@ -459,6 +579,13 @@ if (pc_command_pending)
         if (gains_tx_status == HAL_OK)
         {
             gains_tx_count++;
+
+
+            gains_waiting = 1;
+
+            gains_waiting_sequence =
+                gains_tx_sequence;
+
 
             gains_tx_sequence++;
         }
