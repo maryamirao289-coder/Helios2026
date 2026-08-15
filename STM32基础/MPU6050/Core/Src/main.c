@@ -113,11 +113,13 @@ uint8_t attitude_history_write_index = 0;
 uint8_t retransmit_sync_byte = 0;
 
 uint8_t retransmit_rx_frame[
-    PROTOCOL_RETRANSMIT_REQUEST_LEN
+    PROTOCOL_SET_GAINS_FRAME_LEN
 ];
 
 volatile uint8_t retransmit_rx_state = 0;
 volatile uint8_t retransmit_request_pending = 0;
+
+volatile uint8_t retransmit_rx_frame_length = 0;
 
 volatile HAL_StatusTypeDef
     retransmit_rx_start_status = HAL_ERROR;
@@ -127,6 +129,17 @@ volatile Protocol_Status_t
 
 volatile uint16_t
     retransmit_requested_sequence = 0;
+
+volatile Protocol_Status_t
+    set_gains_status = PROTOCOL_OK;
+
+uint16_t set_gains_sequence = 0;
+
+float set_gains_kp = 0.0f;
+float set_gains_ki = 0.0f;
+
+volatile uint32_t set_gains_count = 0;
+volatile uint32_t set_gains_error_count = 0;
 
 
 /* Retransmit TX */
@@ -439,37 +452,76 @@ else
  */
 if (retransmit_request_pending)
 {
-    retransmit_request_status =
-        Protocol_ParseRetransmitRequest(
-            retransmit_rx_frame,
-            PROTOCOL_RETRANSMIT_REQUEST_LEN,
-            (uint16_t *)
-            &retransmit_requested_sequence
-        );
-
-
-    if (retransmit_request_status ==
-        PROTOCOL_OK)
+    if (retransmit_rx_frame[2] ==
+        PROTOCOL_CMD_RETRANSMIT)
     {
-        retransmit_request_count++;
+        retransmit_request_status =
+            Protocol_ParseRetransmitRequest(
+                retransmit_rx_frame,
+                PROTOCOL_RETRANSMIT_REQUEST_LEN,
+                (uint16_t *)
+                &retransmit_requested_sequence
+            );
 
 
-        if (Slave_FindHistoryFrame(
-                retransmit_requested_sequence,
-                retransmit_tx_frame))
+        if (retransmit_request_status ==
+            PROTOCOL_OK)
         {
-            retransmit_tx_pending = 1;
+            retransmit_request_count++;
+
+
+            if (Slave_FindHistoryFrame(
+                    retransmit_requested_sequence,
+                    retransmit_tx_frame))
+            {
+                retransmit_tx_pending = 1;
+            }
+            else
+            {
+                retransmit_not_found_count++;
+            }
+        }
+    }
+    else if (retransmit_rx_frame[2] ==
+             PROTOCOL_CMD_SET_GAINS)
+    {
+        set_gains_status =
+            Protocol_ParseSetGainsFrame(
+                retransmit_rx_frame,
+                retransmit_rx_frame_length,
+                &set_gains_sequence,
+                &set_gains_kp,
+                &set_gains_ki
+            );
+
+
+        if (set_gains_status ==
+            PROTOCOL_OK)
+        {
+            Mahony_SetGains(
+                &mahony,
+                set_gains_kp,
+                set_gains_ki
+            );
+
+            set_gains_count++;
         }
         else
         {
-            retransmit_not_found_count++;
+            set_gains_error_count++;
         }
+    }
+    else
+    {
+        set_gains_error_count++;
     }
 
 
     retransmit_request_pending = 0;
 
     retransmit_rx_state = 0;
+
+    retransmit_rx_frame_length = 0;
 
 
     /*
@@ -769,12 +821,12 @@ void HAL_UART_RxCpltCallback(
 
 
                 /*
-                 * Receive remaining 6 bytes.
+                 * Receive CMD and LEN.
                  */
                 HAL_UART_Receive_IT(
                     &huart1,
                     &retransmit_rx_frame[2],
-                    PROTOCOL_RETRANSMIT_REQUEST_LEN - 2
+                    2
                 );
             }
             else
@@ -804,13 +856,69 @@ void HAL_UART_RxCpltCallback(
 
         /*
          * State 2:
-         * complete retransmit request received
+         * CMD and LEN received
          */
         else if (retransmit_rx_state == 2)
         {
+            if ((retransmit_rx_frame[2] ==
+                 PROTOCOL_CMD_RETRANSMIT) &&
+                (retransmit_rx_frame[3] == 0))
+            {
+                retransmit_rx_frame_length =
+                    PROTOCOL_RETRANSMIT_REQUEST_LEN;
+
+                retransmit_rx_state = 3;
+
+
+                HAL_UART_Receive_IT(
+                    &huart1,
+                    &retransmit_rx_frame[4],
+                    PROTOCOL_RETRANSMIT_REQUEST_LEN - 4
+                );
+            }
+            else if (
+                (retransmit_rx_frame[2] ==
+                 PROTOCOL_CMD_SET_GAINS) &&
+                (retransmit_rx_frame[3] ==
+                 PROTOCOL_GAINS_PAYLOAD_LEN))
+            {
+                retransmit_rx_frame_length =
+                    PROTOCOL_SET_GAINS_FRAME_LEN;
+
+                retransmit_rx_state = 3;
+
+
+                HAL_UART_Receive_IT(
+                    &huart1,
+                    &retransmit_rx_frame[4],
+                    PROTOCOL_SET_GAINS_FRAME_LEN - 4
+                );
+            }
+            else
+            {
+                retransmit_rx_frame_length = 0;
+
+                retransmit_rx_state = 0;
+
+
+                HAL_UART_Receive_IT(
+                    &huart1,
+                    &retransmit_sync_byte,
+                    1
+                );
+            }
+        }
+
+
+        /*
+         * State 3:
+         * complete command received
+         */
+        else if (retransmit_rx_state == 3)
+        {
             retransmit_request_pending = 1;
 
-            retransmit_rx_state = 3;
+            retransmit_rx_state = 4;
         }
     }
 }
